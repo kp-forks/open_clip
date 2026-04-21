@@ -19,7 +19,7 @@ except ImportError:
     wandb = None
 
 from open_clip import get_input_dtype, CLIP, CustomTextCLIP
-from open_clip.task import get_model_from_task
+from open_clip.task import TrainingTask, get_model_from_task
 from open_clip_train.distributed import is_master
 from open_clip_train.zero_shot import zero_shot_eval
 from open_clip_train.precision import get_autocast
@@ -76,7 +76,7 @@ def train_one_epoch(task, data, epoch, optimizer, scaler, scheduler, args, tb_wr
     sample_digits = math.ceil(math.log(dataloader.num_samples + 1, 10))
 
     if args.accum_freq > 1:
-        accum_images, accum_texts, accum_features = [], [], {}
+        accum_batches, accum_features = [], {}
 
     losses_m = {}
     batch_time_m = AverageMeter()
@@ -89,16 +89,14 @@ def train_one_epoch(task, data, epoch, optimizer, scaler, scheduler, args, tb_wr
         if not args.skip_scheduler:
             scheduler(step)
 
-        images, texts = batch
-        images = images.to(device=device, dtype=input_dtype, non_blocking=True)
-        texts = texts.to(device=device, non_blocking=True)
+        batch = task.prepare_batch(batch, device=device, input_dtype=input_dtype)
 
         data_time_m.update(time.time() - end)
         optimizer.zero_grad()
 
         if args.accum_freq == 1:
             with autocast():
-                losses = task(images, texts)
+                losses = task(batch)
                 total_loss = losses["loss"]
 
             backward(total_loss, scaler)
@@ -106,7 +104,7 @@ def train_one_epoch(task, data, epoch, optimizer, scaler, scheduler, args, tb_wr
             # First, cache the features without any gradient tracking.
             with torch.no_grad():
                 with autocast():
-                    model_out = task.trainable_module(images, texts)
+                    model_out = task.trainable_module(**batch)
 
                     for f in ("logit_scale", "logit_bias"):
                         model_out.pop(f, None)
@@ -117,8 +115,7 @@ def train_one_epoch(task, data, epoch, optimizer, scaler, scheduler, args, tb_wr
                         else:
                             accum_features[key] = [val]
 
-                accum_images.append(images)
-                accum_texts.append(texts)
+                accum_batches.append(batch)
 
             # If (i + 1) % accum_freq is not zero, move on to the next batch.
             if ((i + 1) % args.accum_freq) > 0:
@@ -130,8 +127,7 @@ def train_one_epoch(task, data, epoch, optimizer, scaler, scheduler, args, tb_wr
             # Call backwards each time, but only step optimizer at the end.
             optimizer.zero_grad()
             for j in range(args.accum_freq):
-                images = accum_images[j]
-                texts = accum_texts[j]
+                batch_j = accum_batches[j]
 
                 # Disable gradient sync for all but the last accumulation step.
                 # FSDP2: set_requires_gradient_sync; DDP: no_sync context manager.
@@ -151,7 +147,7 @@ def train_one_epoch(task, data, epoch, optimizer, scaler, scheduler, args, tb_wr
                 ddp_context = task.trainable_module.no_sync() if use_ddp_no_sync else nullcontext()
                 with ddp_context:
                     with autocast():
-                        model_out = task.trainable_module(images, texts)
+                        model_out = task.trainable_module(**batch_j)
 
                         inputs_no_accum = {}
                         inputs_no_accum["logit_scale"] = logit_scale = model_out.pop("logit_scale")
@@ -163,7 +159,7 @@ def train_one_epoch(task, data, epoch, optimizer, scaler, scheduler, args, tb_wr
                             accumulated = accum_features[key]
                             inputs[key] = torch.cat(accumulated[:j] + [model_out[key]] + accumulated[j + 1:])
 
-                        losses = task.compute_accum_loss(inputs, inputs_no_accum, accum_texts)
+                        losses = task.compute_accum_loss(inputs, inputs_no_accum, accum_batches)
                         del inputs
                         del inputs_no_accum
                         total_loss = sum(v for k, v in losses.items() if k.endswith('_loss'))
@@ -192,7 +188,7 @@ def train_one_epoch(task, data, epoch, optimizer, scaler, scheduler, args, tb_wr
 
         # reset gradient accum, if enabled
         if args.accum_freq > 1:
-            accum_images, accum_texts, accum_features = [], [], {}
+            accum_batches, accum_features = [], {}
 
         # Note: we clamp to 4.6052 = ln(100), as in the original paper.
         task.clamp_logit_scale()
@@ -201,7 +197,7 @@ def train_one_epoch(task, data, epoch, optimizer, scaler, scheduler, args, tb_wr
         end = time.time()
         batch_count = i_accum + 1
         if is_master(args) and (i_accum % args.log_every_n_steps == 0 or batch_count == num_batches_per_epoch):
-            batch_size = len(images)
+            batch_size = len(batch["image"])
             num_samples = batch_count * batch_size * args.accum_freq * args.world_size
             samples_per_epoch = dataloader.num_samples
             percent_complete = 100.0 * batch_count / num_batches_per_epoch
@@ -268,6 +264,13 @@ def evaluate(model_or_task, data, epoch, args, tb_writer=None, tokenizer=None):
 
     device = torch.device(args.device)
     model_or_task.eval()
+
+    # Use task's batch helpers if available, otherwise fall back to base TrainingTask
+    # methods (supports passing a plain model without a task wrapper).
+    if hasattr(model_or_task, 'prepare_batch'):
+        batch_helper = model_or_task
+    else:
+        batch_helper = TrainingTask()
     model = get_model_from_task(model_or_task)
 
     zero_shot_metrics = zero_shot_eval(model_or_task, data, epoch, args, tokenizer=tokenizer)
@@ -291,12 +294,14 @@ def evaluate(model_or_task, data, epoch, args, tb_writer=None, tokenizer=None):
             dataloader_iter = iter(dataloader)
 
         if use_fsdp_eval:
-            # Pre-allocate dummy tensors for non-master ranks
-            image_size = model.visual.image_size
-            if not isinstance(image_size, tuple):
-                image_size = (image_size, image_size)
-            dummy_images = torch.zeros(1, 3, *image_size, device=device, dtype=input_dtype)
-            dummy_texts = torch.zeros(1, model.context_length, device=device, dtype=torch.long)
+            # Pre-allocate dummy batch for non-master ranks
+            dummy_batch = batch_helper.create_dummy_batch(
+                image_size=model.visual.image_size,
+                context_length=model.context_length,
+                batch_size=1,
+                device=device,
+                dtype=input_dtype,
+            )
             signal = torch.zeros(1, device=device, dtype=torch.long)
 
         # FIXME this does not scale past small eval datasets
@@ -316,21 +321,17 @@ def evaluate(model_or_task, data, epoch, args, tb_writer=None, tokenizer=None):
                         break
 
                     if is_rank0:
-                        images, texts = batch
-                        images = images.to(device=device, dtype=input_dtype, non_blocking=True)
-                        texts = texts.to(device=device, non_blocking=True)
+                        batch = batch_helper.prepare_batch(batch, device, input_dtype)
                     else:
-                        images, texts = dummy_images, dummy_texts
+                        batch = dummy_batch
                 else:
                     batch = next(dataloader_iter, None)
                     if batch is None:
                         break
-                    images, texts = batch
-                    images = images.to(device=device, dtype=input_dtype, non_blocking=True)
-                    texts = texts.to(device=device, non_blocking=True)
+                    batch = batch_helper.prepare_batch(batch, device, input_dtype)
 
                 with autocast():
-                    model_out = model_or_task(images, texts)
+                    model_out = model_or_task(batch)
 
                 if is_rank0:
                     image_features = model_out["image_features"]
@@ -344,14 +345,14 @@ def evaluate(model_or_task, data, epoch, args, tb_writer=None, tokenizer=None):
                     logits_per_image = logit_scale * image_features @ text_features.t()
                     logits_per_text = logits_per_image.t()
 
-                    batch_size = images.shape[0]
+                    batch_size = len(batch["image"])
                     labels = torch.arange(batch_size, device=device).long()
                     total_loss = (
                         F.cross_entropy(logits_per_image, labels) +
                         F.cross_entropy(logits_per_text, labels)
                     ) / 2
 
-                    gen_loss = maybe_compute_generative_loss(model_out, texts=texts)
+                    gen_loss = maybe_compute_generative_loss(model_out, texts=batch.get("text"))
 
                     cumulative_loss += total_loss * batch_size
                     if gen_loss is not None:

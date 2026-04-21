@@ -64,6 +64,51 @@ class TrainingTask(nn.Module):
         # compatibility with non-FSDP models (e.g. logit_scale, logit_bias).
         self.normalize_checkpoint_scalars = True
 
+    @property
+    def data_keys(self) -> Tuple[str, ...]:
+        """Keys expected in the batch dict from the data pipeline."""
+        return ("image", "text")
+
+    def prepare_batch(
+            self,
+            batch: dict,
+            device: torch.device,
+            input_dtype: Optional[torch.dtype] = None,
+    ) -> dict:
+        """Move batch dict tensors to device with correct dtypes.
+
+        Float tensors (images) get input_dtype; integer tensors (text) stay as-is.
+        Recurses into nested dicts (for future CLAP audio dicts).
+        """
+        prepared = {}
+        for key, val in batch.items():
+            if isinstance(val, torch.Tensor):
+                if val.is_floating_point():
+                    prepared[key] = val.to(device=device, dtype=input_dtype, non_blocking=True)
+                else:
+                    prepared[key] = val.to(device=device, non_blocking=True)
+            elif isinstance(val, dict):
+                prepared[key] = self.prepare_batch(val, device, input_dtype)
+            else:
+                prepared[key] = val
+        return prepared
+
+    def create_dummy_batch(
+            self,
+            image_size,
+            context_length: int,
+            batch_size: int = 1,
+            device: Optional[torch.device] = None,
+            dtype: Optional[torch.dtype] = None,
+    ) -> dict:
+        """Create a dummy batch for FSDP eval on non-rank-0 workers."""
+        if not isinstance(image_size, tuple):
+            image_size = (image_size, image_size)
+        return {
+            "image": torch.zeros(batch_size, 3, *image_size, device=device, dtype=dtype),
+            "text": torch.zeros(batch_size, context_length, device=device, dtype=torch.long),
+        }
+
     def get_trainable_module(self, use_ema: bool = True) -> nn.Module:
         """Get the trainable module, optionally returning EMA version."""
         if use_ema and self.trainable_module_ema is not None:
@@ -338,21 +383,35 @@ class TrainingTask(nn.Module):
             with torch.no_grad():
                 model.logit_scale.clamp_(0, max_val)
 
-    def compute_accum_loss(self, inputs, inputs_no_accum, accum_texts):
+    def compute_accum_loss(self, inputs, inputs_no_accum, accum_batches):
         """Compute loss from accumulated features for gradient accumulation.
 
         Override in subclasses that need to derive training targets from
-        raw text tokens (e.g. autoregressive label creation in CoCa).
+        raw batch dicts (e.g. autoregressive label creation in CoCa).
         """
         return self.loss(**inputs, **inputs_no_accum, output_dict=True)
 
     def forward(self, *args, **kwargs):
         if not self.training:
             model = self.get_trainable_module(use_ema=True)
+            if len(args) == 1 and isinstance(args[0], dict):
+                return model(**args[0])
             return model(*args, **kwargs)
-        return self.training_forward(*args, **kwargs)
+        # Normalize to batch dict
+        if len(args) == 1 and isinstance(args[0], dict):
+            batch = args[0]
+        elif args and kwargs:
+            # Mixed positional + keyword: zip positional with leading keys,
+            # then merge remaining kwargs.
+            batch = dict(zip(self.data_keys, args))
+            batch.update(kwargs)
+        elif args:
+            batch = dict(zip(self.data_keys, args))
+        else:
+            batch = kwargs
+        return self.training_forward(batch)
 
-    def training_forward(self, *args, **kwargs) -> Dict[str, torch.Tensor]:
+    def training_forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         raise NotImplementedError
 
 

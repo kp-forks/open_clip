@@ -18,6 +18,7 @@ import torchvision.datasets as datasets
 import webdataset as wds
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler, IterableDataset, get_worker_info
+from torch.utils.data.dataloader import default_collate
 from torch.utils.data.distributed import DistributedSampler
 from webdataset.filters import _shuffle
 from webdataset.tariterators import base_plus_ext, url_opener, tar_file_expander, valid_sample
@@ -29,20 +30,25 @@ class CsvDataset(Dataset):
         _logger.debug(f'Loading csv data from {input_filename}.')
         df = pd.read_csv(input_filename, sep=sep)
 
-        self.images = df[img_key].tolist()
-        self.captions = df[caption_key].tolist()
+        # Keep as pandas Series rather than converting to Python lists.
+        # Python lists of strings cause copy-on-write memory duplication in
+        # forked DataLoader workers because the cyclic GC walks every element
+        # and modifies reference counts.  Pandas Series are backed by
+        # numpy/pyarrow buffers that the GC does not traverse.
+        self.images = df[img_key]
+        self.captions = df[caption_key]
         self.transforms = transforms
         _logger.debug('Done loading data.')
 
         self.tokenize = tokenizer
 
     def __len__(self):
-        return len(self.captions)
+        return len(self.images)
 
     def __getitem__(self, idx):
-        images = self.transforms(Image.open(str(self.images[idx])))
-        texts = self.tokenize([str(self.captions[idx])])[0]
-        return images, texts
+        image = self.transforms(Image.open(str(self.images.iloc[idx])))
+        text = self.tokenize([str(self.captions.iloc[idx])])[0]
+        return {"image": image, "text": text}
 
 
 class SharedEpoch:
@@ -162,10 +168,10 @@ def get_imagenet(args, preprocess_fns, split):
 def count_samples(dataloader):
     os.environ["WDS_EPOCH"] = "0"
     n_elements, n_batches = 0, 0
-    for images, texts in dataloader:
+    for batch in dataloader:
         n_batches += 1
-        n_elements += len(images)
-        assert len(images) == len(texts)
+        n_elements += len(batch["image"])
+        assert len(batch["image"]) == len(batch["text"])
     return n_elements, n_batches
 
 
@@ -387,10 +393,9 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
     pipeline.extend([
         wds.select(filter_no_caption_or_no_image),
         wds.decode("pilrgb", handler=log_and_continue),
-        wds.rename(image="jpg;png;jpeg;webp", text="txt"),
+        wds.rename(image="jpg;png;jpeg;webp", text="txt", keep=False),
         wds.map_dict(image=preprocess_img, text=lambda text: tokenizer(text)[0]),
-        wds.to_tuple("image", "text"),
-        wds.batched(args.batch_size, partial=not is_train)
+        wds.batched(args.batch_size, partial=not is_train, collation_fn=default_collate),
     ])
 
     dataset = wds.DataPipeline(*pipeline)
@@ -495,7 +500,7 @@ class SyntheticDataset(Dataset):
     def __getitem__(self, idx):
         if self.transform is not None:
             image = self.transform(self.image)
-        return image, self.preprocess_txt(self.caption)
+        return {"image": image, "text": self.preprocess_txt(self.caption)}
 
 
 def get_synthetic_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer=None):

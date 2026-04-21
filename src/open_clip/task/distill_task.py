@@ -49,11 +49,11 @@ class DistillCLIPTask(TrainingTask):
         self.teacher.eval()
         return self
 
-    def training_forward(self, images: torch.Tensor, texts: torch.Tensor) -> Dict[str, torch.Tensor]:
-        model_out = self.trainable_module(images, texts)
+    def training_forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        model_out = self.trainable_module(**batch)
         logit_scale = model_out["logit_scale"]
         with torch.no_grad():
-            teacher_out = self.teacher(images, texts)
+            teacher_out = self.teacher(**batch)
         model_out.update({f'dist_{k}': v for k, v in teacher_out.items()})
         losses = self.loss(**model_out, output_dict=True)
         total_loss = sum(v for k, v in losses.items() if k.endswith('_loss'))

@@ -6,6 +6,9 @@ import tarfile
 import io
 from PIL import Image
 
+import torch
+from torchvision import transforms
+
 from open_clip_train.data import get_wds_dataset
 from open_clip_train.params import parse_args
 from open_clip_train.main import random_seed
@@ -64,7 +67,7 @@ def build_params(input_shards, seed=0):
     args.batch_size = 1
     random_seed(seed)
 
-    preprocess_img = lambda x: x
+    preprocess_img = transforms.ToTensor()
     tokenizer = lambda x: [x.strip()]
 
     return args, preprocess_img, tokenizer
@@ -85,7 +88,7 @@ def test_single_source():
     
     counts = collections.defaultdict(int)
     for sample in dataloader:
-        txts = sample[1]
+        txts = sample["text"]
         for txt in txts:
             counts[txt] += 1
     
@@ -101,7 +104,7 @@ def test_two_sources():
 
     counts = collections.defaultdict(int)
     for sample in dataloader:
-        txts = sample[1]
+        txts = sample["text"]
         for txt in txts:
             counts[txt] += 1
     
@@ -120,7 +123,7 @@ def test_two_sources_same_weights():
 
     counts = collections.defaultdict(int)
     for sample in dataloader:
-        txts = sample[1]
+        txts = sample["text"]
         for txt in txts:
             counts[txt] += 1
     
@@ -138,7 +141,7 @@ def test_two_sources_with_upsampling():
 
     counts = collections.defaultdict(int)
     for sample in dataloader:
-        txts = sample[1]
+        txts = sample["text"]
         for txt in txts:
             counts[txt] += 1
     

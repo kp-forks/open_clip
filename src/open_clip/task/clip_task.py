@@ -37,8 +37,8 @@ class CLIPTask(TrainingTask):
                 world_size=world_size,
             )
 
-    def training_forward(self, images: torch.Tensor, texts: torch.Tensor) -> Dict[str, torch.Tensor]:
-        model_out = self.trainable_module(images, texts)
+    def training_forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        model_out = self.trainable_module(**batch)
         logit_scale = model_out["logit_scale"]
         losses = self.loss(**model_out, output_dict=True)
         total_loss = sum(v for k, v in losses.items() if k.endswith('_loss'))
