@@ -593,9 +593,11 @@ def main(args):
                     if os.path.exists(trash_dir):
                         shutil.rmtree(trash_dir)
             if args.delete_previous_checkpoint and args.save_logs:
-                prev_dir = os.path.join(args.checkpoint_path, f"epoch_{completed_epoch - 1}")
-                if os.path.isdir(prev_dir):
-                    shutil.rmtree(prev_dir)
+                previous_epoch = completed_epoch - args.save_frequency
+                if previous_epoch > 0:
+                    prev_dir = os.path.join(args.checkpoint_path, f"epoch_{previous_epoch}")
+                    if os.path.isdir(prev_dir):
+                        shutil.rmtree(prev_dir)
 
         else:
             # Full checkpoint — gather to rank 0, single .pt file
@@ -617,9 +619,11 @@ def main(args):
                         os.path.join(args.checkpoint_path, f"epoch_{completed_epoch}.pt"),
                     )
                 if args.delete_previous_checkpoint:
-                    previous_checkpoint = os.path.join(args.checkpoint_path, f"epoch_{completed_epoch - 1}.pt")
-                    if os.path.exists(previous_checkpoint):
-                        os.remove(previous_checkpoint)
+                    previous_epoch = completed_epoch - args.save_frequency
+                    if previous_epoch > 0:
+                        previous_checkpoint = os.path.join(args.checkpoint_path, f"epoch_{previous_epoch}.pt")
+                        if os.path.exists(previous_checkpoint):
+                            os.remove(previous_checkpoint)
 
                 if args.save_most_recent:
                     # try not to corrupt the latest checkpoint if save fails
