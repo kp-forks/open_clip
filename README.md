@@ -27,6 +27,8 @@
 > **Dependency bump:** Minimum `torch>=2.6` (was `>=2.0`). This is the version where `torch.load(weights_only=True)` became the default — all checkpoint loads in this repo now pass `weights_only=True` explicitly with no `weights_only=False` fallback. If you're resuming training with a custom optimizer that pickles non-allowlisted Python types, register them via `torch.serialization.add_safe_globals([...])` before calling `load_checkpoint`.
 >
 > **Checkpoint compatibility:** Existing pretrained `.pt` checkpoints load without changes. Training checkpoints saved on this branch include a `state_dict` key that's compatible with prior versions (EMA and optimizer state are also preserved). `0-D` vs `1-D` scalar reshape from the FSDP path is reconciled on load, so you can resume a DDP-trained checkpoint under FSDP2 and vice versa.
+>
+> **Legacy training entry point:** If you'd rather stay on `main` for the model/factory side but skip the task abstraction (e.g. an existing training script that drives `train_one_epoch(model, loss, ...)` directly), `python -m open_clip_train.legacy_main` runs the pre-task training loop with no `TrainingTask` wrapping, no FSDP, no EMA. It uses the same `params.py` (and ignores the new FSDP flags), the same `data.py`, `zero_shot.py`, etc. Provided as a transitional shim — likely to be removed once the task pipeline lands as default.
 
 Welcome to an open source implementation of OpenAI's [CLIP](https://arxiv.org/abs/2103.00020) (Contrastive Language-Image Pre-training).
 
