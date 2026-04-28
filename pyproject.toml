@@ -55,7 +55,7 @@ training = [
 ]
 test = [
     'pytest-split',
-    'pytest',
+    'pytest>=9.0.3',
     'open_clip_torch[training]',
     'requests'
 ]
