@@ -148,7 +148,7 @@ def create_test_data_for_model(
                     batch_size = batch_size
             )
         assert os.path.isfile(input_file_text), f"missing input data, expected at {input_file_text}"
-        input_data_text = torch.load(input_file_text)
+        input_data_text = torch.load(input_file_text, weights_only=True)
         output_data_text = inference_text(model, model_name, input_data_text)
         print(f"{output_file_text}")
         torch.save(output_data_text, output_file_text)
@@ -166,7 +166,7 @@ def create_test_data_for_model(
                     batch_size = batch_size
             )
         assert os.path.isfile(input_file_image), f"missing input data, expected at {input_file_image}"
-        input_data_image = torch.load(input_file_image)
+        input_data_image = torch.load(input_file_image, weights_only=True)
         output_data_image = inference_image(model, preprocess_val, input_data_image)
         print(f"{output_file_image}")
         torch.save(output_data_image, output_file_image)

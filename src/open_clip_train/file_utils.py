@@ -69,11 +69,17 @@ def pt_save(pt_obj, file_path):
         torch.save(pt_obj, file_path)
 
 def pt_load(file_path, map_location=None):
+    """Load a checkpoint via fsspec. Uses ``weights_only=True``.
+
+    If a checkpoint contains optimizer state with custom (non-allowlisted)
+    types, the caller must register them via
+    ``torch.serialization.add_safe_globals([...])`` before calling.
+    """
     if file_path.startswith('s3'):
         _logger.info('Loading remote checkpoint, which may take a bit.')
     of = fsspec.open(file_path, "rb")
     with of as f:
-        out = torch.load(f, map_location=map_location)
+        out = torch.load(f, map_location=map_location, weights_only=True)
     return out
 
 def check_exists(file_path):

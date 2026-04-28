@@ -1,7 +1,8 @@
-"""Unit tests for TrainingTask base class methods.
+"""Unit tests for TrainingTask + ImageTextTask methods.
 
-Tests prepare_batch, create_dummy_batch, forward() normalization,
-state_dict_for_inference, and clamp_logit_scale.
+Covers (via concrete CLIPTask): prepare_batch, create_dummy_batch,
+forward() calling-convention normalization, state_dict_for_inference,
+clamp_logit_scale, and data_keys.
 """
 import copy
 import math
@@ -11,7 +12,6 @@ import torch
 import torch.nn as nn
 
 from open_clip.task import CLIPTask
-from open_clip.task.base_task import TrainingTask
 
 
 # ---------------------------------------------------------------------------

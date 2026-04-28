@@ -19,7 +19,7 @@ except ImportError:
     wandb = None
 
 from open_clip import get_input_dtype, CLIP, CustomTextCLIP
-from open_clip.task import TrainingTask, get_model_from_task
+from open_clip.task import get_model_from_task
 from open_clip_train.distributed import is_master
 from open_clip_train.zero_shot import zero_shot_eval
 from open_clip_train.precision import get_autocast
@@ -254,7 +254,12 @@ def train_one_epoch(task, data, epoch, optimizer, scaler, scheduler, args, tb_wr
     # end for
 
 
-def evaluate(model_or_task, data, epoch, args, tb_writer=None, tokenizer=None):
+def evaluate(task, data, epoch, args, tb_writer=None, tokenizer=None):
+    """Run validation + zero-shot eval. ``task`` must be a TrainingTask subclass.
+
+    The image+text-shaped val loop below assumes an ImageTextTask (or compiled
+    wrapper around one); other modalities will need their own eval entry point.
+    """
     metrics = {}
     use_fsdp_eval = getattr(args, 'fsdp', False) and getattr(args, 'distributed', False)
     is_rank0 = is_master(args)
@@ -263,17 +268,11 @@ def evaluate(model_or_task, data, epoch, args, tb_writer=None, tokenizer=None):
         return metrics
 
     device = torch.device(args.device)
-    model_or_task.eval()
+    task.eval()
 
-    # Use task's batch helpers if available, otherwise fall back to base TrainingTask
-    # methods (supports passing a plain model without a task wrapper).
-    if hasattr(model_or_task, 'prepare_batch'):
-        batch_helper = model_or_task
-    else:
-        batch_helper = TrainingTask()
-    model = get_model_from_task(model_or_task)
+    model = get_model_from_task(task)
 
-    zero_shot_metrics = zero_shot_eval(model_or_task, data, epoch, args, tokenizer=tokenizer)
+    zero_shot_metrics = zero_shot_eval(task, data, epoch, args, tokenizer=tokenizer)
     if is_rank0:
         metrics.update(zero_shot_metrics)
 
@@ -295,7 +294,7 @@ def evaluate(model_or_task, data, epoch, args, tb_writer=None, tokenizer=None):
 
         if use_fsdp_eval:
             # Pre-allocate dummy batch for non-master ranks
-            dummy_batch = batch_helper.create_dummy_batch(
+            dummy_batch = task.create_dummy_batch(
                 image_size=model.visual.image_size,
                 context_length=model.context_length,
                 batch_size=1,
@@ -321,17 +320,17 @@ def evaluate(model_or_task, data, epoch, args, tb_writer=None, tokenizer=None):
                         break
 
                     if is_rank0:
-                        batch = batch_helper.prepare_batch(batch, device, input_dtype)
+                        batch = task.prepare_batch(batch, device, input_dtype)
                     else:
                         batch = dummy_batch
                 else:
                     batch = next(dataloader_iter, None)
                     if batch is None:
                         break
-                    batch = batch_helper.prepare_batch(batch, device, input_dtype)
+                    batch = task.prepare_batch(batch, device, input_dtype)
 
                 with autocast():
-                    model_out = model_or_task(batch)
+                    model_out = task(batch)
 
                 if is_rank0:
                     image_features = model_out["image_features"]

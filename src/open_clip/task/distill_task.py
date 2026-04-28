@@ -3,10 +3,10 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
-from .base_task import TrainingTask
+from .image_text_task import ImageTextTask
 
 
-class DistillCLIPTask(TrainingTask):
+class DistillCLIPTask(ImageTextTask):
     """Distillation task wrapping student model + frozen teacher + DistillClipLoss."""
 
     def __init__(
@@ -15,6 +15,7 @@ class DistillCLIPTask(TrainingTask):
             teacher_model: nn.Module,
             *,
             loss: Optional[nn.Module] = None,
+            default_loss: bool = True,
             local_loss: bool = False,
             gather_with_grad: bool = False,
             cache_labels: bool = True,
@@ -24,8 +25,7 @@ class DistillCLIPTask(TrainingTask):
             dtype: Optional[torch.dtype] = None,
             verbose: bool = True,
     ):
-        super().__init__(device=device, dtype=dtype, verbose=verbose)
-        self.trainable_module = student_model
+        super().__init__(student_model, device=device, dtype=dtype, verbose=verbose)
         self.teacher = teacher_model
         self.teacher.eval()
         # Freeze teacher parameters
@@ -33,7 +33,7 @@ class DistillCLIPTask(TrainingTask):
             p.requires_grad = False
         if loss is not None:
             self.loss = loss
-        else:
+        elif default_loss:
             from open_clip.loss import DistillClipLoss
             self.loss = DistillClipLoss(
                 local_loss=local_loss,
@@ -42,6 +42,7 @@ class DistillCLIPTask(TrainingTask):
                 rank=rank,
                 world_size=world_size,
             )
+        # else: eval-only construction, no self.loss attribute
 
     def train(self, mode: bool = True):
         """Override to keep teacher always in eval mode."""

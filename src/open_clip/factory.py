@@ -162,10 +162,7 @@ def load_state_dict(
         from safetensors.torch import load_file
         checkpoint = load_file(checkpoint_path, device=device)
     else:
-        try:
-            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=weights_only)
-        except TypeError:
-            checkpoint = torch.load(checkpoint_path, map_location=device)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=weights_only)
 
     if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
         state_dict = checkpoint['state_dict']
@@ -787,13 +784,12 @@ def _set_model_device_and_precision(
 
 
 def create_loss(args):
-    """Deprecated: use create_task() instead. Loss is now created by the task."""
-    warnings.warn(
-        "create_loss() is deprecated. Loss is now created internally by the task. "
-        "Use create_task() instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
+    """Construct a loss module from training args.
+
+    Standalone factory for users running their own training loops. The
+    training pipeline in this repo uses ``create_task()`` instead, which
+    wraps model + loss and handles EMA/FSDP/checkpointing.
+    """
     if args.distill:
         return DistillClipLoss(
             local_loss=args.local_loss,

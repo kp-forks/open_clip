@@ -3,10 +3,10 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
-from .base_task import TrainingTask
+from .image_text_task import ImageTextTask
 
 
-class CLIPTask(TrainingTask):
+class CLIPTask(ImageTextTask):
     """Standard CLIP training task wrapping model + ClipLoss."""
 
     def __init__(
@@ -14,6 +14,7 @@ class CLIPTask(TrainingTask):
             model: nn.Module,
             *,
             loss: Optional[nn.Module] = None,
+            default_loss: bool = True,
             local_loss: bool = False,
             gather_with_grad: bool = False,
             cache_labels: bool = True,
@@ -23,11 +24,10 @@ class CLIPTask(TrainingTask):
             dtype: Optional[torch.dtype] = None,
             verbose: bool = True,
     ):
-        super().__init__(device=device, dtype=dtype, verbose=verbose)
-        self.trainable_module = model
+        super().__init__(model, device=device, dtype=dtype, verbose=verbose)
         if loss is not None:
             self.loss = loss
-        else:
+        elif default_loss:
             from open_clip.loss import ClipLoss
             self.loss = ClipLoss(
                 local_loss=local_loss,
@@ -36,6 +36,7 @@ class CLIPTask(TrainingTask):
                 rank=rank,
                 world_size=world_size,
             )
+        # else: eval-only construction, no self.loss attribute
 
     def training_forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         model_out = self.trainable_module(**batch)

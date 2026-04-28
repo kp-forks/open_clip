@@ -102,7 +102,10 @@ def load_checkpoint(
         sd = checkpoint["state_dict"]
         if not is_distributed and next(iter(sd.items()))[0].startswith('module'):
             sd = {k[len('module.'):]: v for k, v in sd.items()}
-        task.load_state_dict({"state_dict": sd})
+        task_sd = {"state_dict": sd}
+        if 'state_dict_ema' in checkpoint:
+            task_sd["state_dict_ema"] = checkpoint["state_dict_ema"]
+        task.load_state_dict(task_sd)
         if optimizer is not None and "optimizer" in checkpoint:
             model = unwrap_model(task.trainable_module)
             _load_optim_state_dict(model, optimizer, checkpoint["optimizer"], task._fsdp_enabled)

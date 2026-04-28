@@ -1,5 +1,4 @@
 import logging
-import math
 
 _logger = logging.getLogger(__name__)
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -35,10 +34,12 @@ def get_model_from_task(task_or_model: nn.Module) -> nn.Module:
 
 
 class TrainingTask(nn.Module):
-    """Base class for CLIP training tasks.
+    """Modality-agnostic base for training tasks.
 
-    Wraps model + loss into a single nn.Module, providing utilities for
-    EMA, DDP, FSDP2, checkpointing, and logit scale clamping.
+    Wraps a model + (optional) loss into a single nn.Module, providing
+    utilities for EMA, DDP, FSDP2, and checkpointing. Does NOT make any
+    assumption about the shape or keys of training batches — that contract
+    lives in modality-specific subclasses (e.g. ``ImageTextTask``).
 
     Note: ``state_dict()`` returns ``{'state_dict': ..., 'state_dict_ema': ...}``
     rather than the standard ``nn.Module.state_dict()`` flat dict. Callers should
@@ -50,11 +51,14 @@ class TrainingTask(nn.Module):
 
     def __init__(
             self,
+            model: nn.Module,
+            *,
             device: Optional[torch.device] = None,
             dtype: Optional[torch.dtype] = None,
             verbose: bool = True,
     ):
         super().__init__()
+        self.trainable_module = model
         self.trainable_module_ema = None
         self._device = device
         self._dtype = dtype
@@ -64,11 +68,6 @@ class TrainingTask(nn.Module):
         # compatibility with non-FSDP models (e.g. logit_scale, logit_bias).
         self.normalize_checkpoint_scalars = True
 
-    @property
-    def data_keys(self) -> Tuple[str, ...]:
-        """Keys expected in the batch dict from the data pipeline."""
-        return ("image", "text")
-
     def prepare_batch(
             self,
             batch: dict,
@@ -77,8 +76,8 @@ class TrainingTask(nn.Module):
     ) -> dict:
         """Move batch dict tensors to device with correct dtypes.
 
-        Float tensors (images) get input_dtype; integer tensors (text) stay as-is.
-        Recurses into nested dicts (for future CLAP audio dicts).
+        Float tensors get ``input_dtype``; integer tensors stay as-is. Recurses
+        into nested dicts (e.g. NaFlex patch dicts under ``"image"``).
         """
         prepared = {}
         for key, val in batch.items():
@@ -92,22 +91,6 @@ class TrainingTask(nn.Module):
             else:
                 prepared[key] = val
         return prepared
-
-    def create_dummy_batch(
-            self,
-            image_size,
-            context_length: int,
-            batch_size: int = 1,
-            device: Optional[torch.device] = None,
-            dtype: Optional[torch.dtype] = None,
-    ) -> dict:
-        """Create a dummy batch for FSDP eval on non-rank-0 workers."""
-        if not isinstance(image_size, tuple):
-            image_size = (image_size, image_size)
-        return {
-            "image": torch.zeros(batch_size, 3, *image_size, device=device, dtype=dtype),
-            "text": torch.zeros(batch_size, context_length, device=device, dtype=torch.long),
-        }
 
     def get_trainable_module(self, use_ema: bool = True) -> nn.Module:
         """Get the trainable module, optionally returning EMA version."""
@@ -371,18 +354,6 @@ class TrainingTask(nn.Module):
             return sd
         return unwrap_model(self.trainable_module).state_dict()
 
-    def clamp_logit_scale(self, max_val: float = math.log(100)):
-        """Clamp logit_scale parameter to [0, max_val].
-
-        With FSDP2, logit_scale is a replicated DTensor. In-place clamp_
-        dispatches to the local tensor on each rank, which is correct for
-        a single-element replicated param.
-        """
-        model = unwrap_model(self.trainable_module)
-        if hasattr(model, 'logit_scale'):
-            with torch.no_grad():
-                model.logit_scale.clamp_(0, max_val)
-
     def compute_accum_loss(self, inputs, inputs_no_accum, accum_batches):
         """Compute loss from accumulated features for gradient accumulation.
 
@@ -391,28 +362,15 @@ class TrainingTask(nn.Module):
         """
         return self.loss(**inputs, **inputs_no_accum, output_dict=True)
 
-    def forward(self, *args, **kwargs):
+    def forward(self, batch: Dict[str, torch.Tensor]):
+        """Run training_forward (train) or model.forward (eval) on a dict batch.
+
+        Subclasses with shape-specific calling conventions (e.g. positional
+        ``(image, text)`` for image+text tasks) should override this.
+        """
         if not self.training:
-            model = self.get_trainable_module(use_ema=True)
-            if len(args) == 1 and isinstance(args[0], dict):
-                return model(**args[0])
-            return model(*args, **kwargs)
-        # Normalize to batch dict
-        if len(args) == 1 and isinstance(args[0], dict):
-            batch = args[0]
-        elif args and kwargs:
-            # Mixed positional + keyword: zip positional with leading keys,
-            # then merge remaining kwargs.
-            batch = dict(zip(self.data_keys, args))
-            batch.update(kwargs)
-        elif args:
-            batch = dict(zip(self.data_keys, args))
-        else:
-            batch = kwargs
+            return self.get_trainable_module(use_ema=True)(**batch)
         return self.training_forward(batch)
 
     def training_forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         raise NotImplementedError
-
-
-CLIPTrainingTask = TrainingTask  # backward compatibility

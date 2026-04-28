@@ -3,10 +3,10 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
-from .base_task import TrainingTask
+from .image_text_task import ImageTextTask
 
 
-class CoCaTask(TrainingTask):
+class CoCaTask(ImageTextTask):
     """CoCa training task wrapping model + CoCaLoss."""
 
     def __init__(
@@ -14,6 +14,7 @@ class CoCaTask(TrainingTask):
             model: nn.Module,
             *,
             loss: Optional[nn.Module] = None,
+            default_loss: bool = True,
             caption_loss_weight: float = 2.0,
             clip_loss_weight: float = 1.0,
             local_loss: bool = False,
@@ -25,11 +26,10 @@ class CoCaTask(TrainingTask):
             dtype: Optional[torch.dtype] = None,
             verbose: bool = True,
     ):
-        super().__init__(device=device, dtype=dtype, verbose=verbose)
-        self.trainable_module = model
+        super().__init__(model, device=device, dtype=dtype, verbose=verbose)
         if loss is not None:
             self.loss = loss
-        else:
+        elif default_loss:
             from open_clip.loss import CoCaLoss
             self.loss = CoCaLoss(
                 caption_loss_weight=caption_loss_weight,
@@ -40,6 +40,7 @@ class CoCaTask(TrainingTask):
                 rank=rank,
                 world_size=world_size,
             )
+        # else: eval-only construction, no self.loss attribute
 
     def _build_loss_inputs(self, model_out, batch):
         """Build CoCaLoss inputs with autoregressive shift."""

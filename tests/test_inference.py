@@ -69,8 +69,8 @@ def test_inference_with_data(
         pytest.skip(reason = f"missing test data, expected at {input_text_path}")
     if not os.path.isfile(gt_text_path):
         pytest.skip(reason = f"missing test data, expected at {gt_text_path}")
-    input_text = torch.load(input_text_path)
-    gt_text = torch.load(gt_text_path)
+    input_text = torch.load(input_text_path, weights_only=True)
+    gt_text = torch.load(gt_text_path, weights_only=True)
     y_text = util_test.inference_text(model, model_name, input_text)
     assert (y_text == gt_text).all(), f"text output differs @ {input_text_path}"
     # image
@@ -83,8 +83,8 @@ def test_inference_with_data(
         pytest.skip(reason = f"missing test data, expected at {input_image_path}")
     if not os.path.isfile(gt_image_path):
         pytest.skip(reason = f"missing test data, expected at {gt_image_path}")
-    input_image = torch.load(input_image_path)
-    gt_image = torch.load(gt_image_path)
+    input_image = torch.load(input_image_path, weights_only=True)
+    gt_image = torch.load(gt_image_path, weights_only=True)
     y_image = util_test.inference_image(model, preprocess_val, input_image)
     assert (y_image == gt_image).all(), f"image output differs @ {input_image_path}"
 

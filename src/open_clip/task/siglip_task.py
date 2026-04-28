@@ -16,13 +16,21 @@ class SigLIPTask(CLIPTask):
             model: nn.Module,
             *,
             loss: Optional[nn.Module] = None,
+            default_loss: bool = True,
             rank: int = 0,
             world_size: int = 1,
             dist_impl: Optional[str] = None,
             **kwargs,
     ):
-        if loss is not None:
-            super().__init__(model, loss=loss, **kwargs)
+        if loss is not None or not default_loss:
+            super().__init__(
+                model,
+                loss=loss,
+                default_loss=False,
+                rank=rank,
+                world_size=world_size,
+                **kwargs,
+            )
         else:
             from open_clip.loss import SigLipLoss
             super().__init__(
