@@ -33,7 +33,7 @@ classifiers = [
         'Topic :: Software Development :: Libraries :: Python Modules',
 ]
 dependencies = [
-    'torch>=2.0',
+    'torch>=2.6',
     'torchvision',
     'regex',
     'ftfy',
@@ -46,7 +46,7 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 training = [
-    'torch>=2.0',
+    'torch>=2.6',
     'webdataset>=0.2.5,<=0.2.86',
     'pandas',
     'transformers[sentencepiece]',
@@ -55,7 +55,7 @@ training = [
 ]
 test = [
     'pytest-split',
-    'pytest',
+    'pytest>=9.0.3',
     'open_clip_torch[training]',
     'requests'
 ]

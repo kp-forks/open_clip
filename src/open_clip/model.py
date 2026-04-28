@@ -5,6 +5,8 @@ Adapted from https://github.com/openai/CLIP. Originally MIT License, Copyright (
 import copy
 import logging
 import math
+
+_logger = logging.getLogger(__name__)
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -263,7 +265,6 @@ def _build_text_tower(
 
 
 class CLIP(nn.Module):
-    output_dict: torch.jit.Final[bool]
 
     def __init__(
             self,
@@ -309,12 +310,10 @@ class CLIP(nn.Module):
         assert freeze_layer_norm, 'Unfreezing LayerNorm is not supported. LayerNorm treated like other weights.'
         lock_text_tower(self, unlocked_layers)
 
-    @torch.jit.ignore
-    def set_grad_checkpointing(self, enable=True):
-        self.visual.set_grad_checkpointing(enable)
-        self.transformer.grad_checkpointing = enable
+    def set_grad_checkpointing(self, enable: bool = True, impl: str = 'inline'):
+        self.visual.set_grad_checkpointing(enable, impl=impl)
+        self.transformer.set_grad_checkpointing(enable, impl=impl)
 
-    @torch.jit.ignore
     def no_weight_decay(self):
         # for timm optimizers, 1d params like logit_scale, logit_bias, ln/bn scale, biases are excluded by default
         no_wd = {'positional_embedding'}
@@ -323,11 +322,14 @@ class CLIP(nn.Module):
                 no_wd.add('visual.' + n)
         return no_wd
 
-    def encode_image(self, image, normalize: bool = False):
+    def _encode_image(self, image, normalize: bool = False):
         features = self.visual(image)
         return F.normalize(features, dim=-1) if normalize else features
 
-    def encode_text(self, text, normalize: bool = False):
+    def encode_image(self, image, normalize: bool = False):
+        return self._encode_image(image, normalize=normalize)
+
+    def _encode_text(self, text, normalize: bool = False):
         cast_dtype = self.transformer.get_cast_dtype()
 
         x = self.token_embedding(text).to(cast_dtype)  # [batch_size, n_ctx, d_model]
@@ -344,9 +346,12 @@ class CLIP(nn.Module):
 
         return F.normalize(x, dim=-1) if normalize else x
 
+    def encode_text(self, text, normalize: bool = False):
+        return self._encode_text(text, normalize=normalize)
+
     def get_logits(self, image, text):
-        image_features = self.encode_image(image, normalize=True)
-        text_features = self.encode_text(text, normalize=True)
+        image_features = self._encode_image(image, normalize=True)
+        text_features = self._encode_text(text, normalize=True)
         image_logits = self.logit_scale.exp() * image_features @ text_features.T
         if self.logit_bias is not None:
             image_logits += self.logit_bias
@@ -452,7 +457,7 @@ class CLIP(nn.Module):
         if output_logit_scale_bias:
             output["logit_scale"] = logit_scale_exp
             if self.logit_bias is not None:
-                output['logit_bias'] = self.logit_bias
+                output['logit_bias'] = self.logit_bias.clone()
 
         return output
 
@@ -461,8 +466,8 @@ class CLIP(nn.Module):
             image: Optional[torch.Tensor] = None,
             text: Optional[torch.Tensor] = None,
     ):
-        image_features = self.encode_image(image, normalize=True) if image is not None else None
-        text_features = self.encode_text(text, normalize=True) if text is not None else None
+        image_features = self._encode_image(image, normalize=True) if image is not None else None
+        text_features = self._encode_text(text, normalize=True) if text is not None else None
 
         if self.output_dict:
             out_dict = {
@@ -471,16 +476,15 @@ class CLIP(nn.Module):
                 "logit_scale": self.logit_scale.exp()
             }
             if self.logit_bias is not None:
-                out_dict['logit_bias'] = self.logit_bias
+                out_dict['logit_bias'] = self.logit_bias.clone()
             return out_dict
 
         if self.logit_bias is not None:
-            return image_features, text_features, self.logit_scale.exp(), self.logit_bias
+            return image_features, text_features, self.logit_scale.exp(), self.logit_bias.clone()
         return image_features, text_features, self.logit_scale.exp()
 
 
 class CustomTextCLIP(nn.Module):
-    output_dict: torch.jit.Final[bool]
 
     def __init__(
             self,
@@ -515,12 +519,10 @@ class CustomTextCLIP(nn.Module):
     def lock_text_tower(self, unlocked_layers: int = 0, freeze_layer_norm: bool = True):
         self.text.lock(unlocked_layers, freeze_layer_norm)
 
-    @torch.jit.ignore
-    def set_grad_checkpointing(self, enable=True):
-        self.visual.set_grad_checkpointing(enable)
-        self.text.set_grad_checkpointing(enable)
+    def set_grad_checkpointing(self, enable: bool = True, impl: str = 'inline'):
+        self.visual.set_grad_checkpointing(enable, impl=impl)
+        self.text.set_grad_checkpointing(enable, impl=impl)
 
-    @torch.jit.ignore
     def no_weight_decay(self):
         # for timm optimizers, 1d params like logit_scale, logit_bias, ln/bn scale, biases are excluded by default
         no_wd = set()
@@ -532,17 +534,23 @@ class CustomTextCLIP(nn.Module):
                 no_wd.add('text.' + n)
         return no_wd
 
-    def encode_image(self, image, normalize: bool = False):
+    def _encode_image(self, image, normalize: bool = False):
         features = self.visual(image)
         return F.normalize(features, dim=-1) if normalize else features
 
-    def encode_text(self, text, normalize: bool = False):
+    def encode_image(self, image, normalize: bool = False):
+        return self._encode_image(image, normalize=normalize)
+
+    def _encode_text(self, text, normalize: bool = False):
         features = self.text(text)
         return F.normalize(features, dim=-1) if normalize else features
 
+    def encode_text(self, text, normalize: bool = False):
+        return self._encode_text(text, normalize=normalize)
+
     def get_logits(self, image, text):
-        image_features = self.encode_image(image, normalize=True)
-        text_features = self.encode_text(text, normalize=True)
+        image_features = self._encode_image(image, normalize=True)
+        text_features = self._encode_text(text, normalize=True)
         image_logits = self.logit_scale.exp() * image_features @ text_features.T
         if self.logit_bias is not None:
             image_logits += self.logit_bias
@@ -635,7 +643,7 @@ class CustomTextCLIP(nn.Module):
         if output_logit_scale_bias:
             output["logit_scale"] = logit_scale_exp
             if self.logit_bias is not None:
-                output['logit_bias'] = self.logit_bias
+                output['logit_bias'] = self.logit_bias.clone()
 
         return output
 
@@ -644,8 +652,8 @@ class CustomTextCLIP(nn.Module):
             image: Optional[torch.Tensor] = None,
             text: Optional[torch.Tensor] = None,
     ):
-        image_features = self.encode_image(image, normalize=True) if image is not None else None
-        text_features = self.encode_text(text, normalize=True) if text is not None else None
+        image_features = self._encode_image(image, normalize=True) if image is not None else None
+        text_features = self._encode_text(text, normalize=True) if text is not None else None
 
         if self.output_dict:
             out_dict = {
@@ -654,11 +662,11 @@ class CustomTextCLIP(nn.Module):
                 "logit_scale": self.logit_scale.exp()
             }
             if self.logit_bias is not None:
-                out_dict['logit_bias'] = self.logit_bias
+                out_dict['logit_bias'] = self.logit_bias.clone()
             return out_dict
 
         if self.logit_bias is not None:
-            return image_features, text_features, self.logit_scale.exp(), self.logit_bias
+            return image_features, text_features, self.logit_scale.exp(), self.logit_bias.clone()
         return image_features, text_features, self.logit_scale.exp()
 
 
@@ -671,7 +679,7 @@ def convert_weights_to_lp(model: nn.Module, dtype=torch.float16):
             if l.bias is not None:
                 l.bias.data = l.bias.data.to(dtype)
 
-        if isinstance(l, (nn.MultiheadAttention, Attention)):
+        if isinstance(l, Attention):
             for attr in [*[f"{s}_proj_weight" for s in ["in", "q", "k", "v"]], "in_proj_bias", "bias_k", "bias_v"]:
                 tensor = getattr(l, attr, None)
                 if tensor is not None:
@@ -714,81 +722,6 @@ def convert_to_custom_text_state_dict(state_dict: dict):
     return state_dict
 
 
-def build_model_from_openai_state_dict(
-        state_dict: dict,
-        quick_gelu=True,
-        cast_dtype=torch.float16,
-):
-    vit = "visual.proj" in state_dict
-
-    if vit:
-        vision_width = state_dict["visual.conv1.weight"].shape[0]
-        vision_layers = len(
-            [k for k in state_dict.keys() if k.startswith("visual.") and k.endswith(".attn.in_proj_weight")])
-        vision_patch_size = state_dict["visual.conv1.weight"].shape[-1]
-        grid_size = round((state_dict["visual.positional_embedding"].shape[0] - 1) ** 0.5)
-        image_size = vision_patch_size * grid_size
-    else:
-        counts: list = [
-            len(set(k.split(".")[2] for k in state_dict if k.startswith(f"visual.layer{b}"))) for b in [1, 2, 3, 4]]
-        vision_layers = tuple(counts)
-        vision_width = state_dict["visual.layer1.0.conv1.weight"].shape[0]
-        output_width = round((state_dict["visual.attnpool.positional_embedding"].shape[0] - 1) ** 0.5)
-        vision_patch_size = None
-        assert output_width ** 2 + 1 == state_dict["visual.attnpool.positional_embedding"].shape[0]
-        image_size = output_width * 32
-
-    embed_dim = state_dict["text_projection"].shape[1]
-    context_length = state_dict["positional_embedding"].shape[0]
-    vocab_size = state_dict["token_embedding.weight"].shape[0]
-    transformer_width = state_dict["ln_final.weight"].shape[0]
-    transformer_heads = transformer_width // 64
-    transformer_layers = len(set(k.split(".")[2] for k in state_dict if k.startswith(f"transformer.resblocks")))
-
-    vision_cfg = CLIPVisionCfg(
-        layers=vision_layers,
-        width=vision_width,
-        patch_size=vision_patch_size,
-        image_size=image_size,
-    )
-    text_cfg = CLIPTextCfg(
-        context_length=context_length,
-        vocab_size=vocab_size,
-        width=transformer_width,
-        heads=transformer_heads,
-        layers=transformer_layers,
-    )
-    model = CLIP(
-        embed_dim,
-        vision_cfg=vision_cfg,
-        text_cfg=text_cfg,
-        quick_gelu=quick_gelu,  # OpenAI models were trained with QuickGELU
-        cast_dtype=cast_dtype,
-    )
-
-    for key in ["input_resolution", "context_length", "vocab_size"]:
-        state_dict.pop(key, None)
-    convert_weights_to_fp16(model)  # OpenAI state dicts are partially converted to float16
-    model.load_state_dict(state_dict)
-    return model.eval()
-
-
-def trace_model(model, batch_size=256, device=torch.device('cpu')):
-    model.eval()
-    image_size = model.visual.image_size
-    example_images = torch.ones((batch_size, 3, image_size, image_size), device=device)
-    example_text = torch.zeros((batch_size, model.context_length), dtype=torch.int, device=device)
-    model = torch.jit.trace_module(
-        model,
-        inputs=dict(
-            forward=(example_images, example_text),
-            encode_text=(example_text,),
-            encode_image=(example_images,)
-        ))
-    model.visual.image_size = image_size
-    return model
-
-
 def resize_pos_embed(state_dict, model, interpolation: str = 'bicubic', antialias: bool = True):
     # Rescale the grid of position embeddings when loading from state_dict
     old_pos_embed = state_dict.get('visual.positional_embedding', None)
@@ -806,7 +739,7 @@ def resize_pos_embed(state_dict, model, interpolation: str = 'bicubic', antialia
         pos_emb_tok, pos_emb_img = None, old_pos_embed
     old_grid_size = to_2tuple(int(math.sqrt(len(pos_emb_img))))
 
-    logging.info('Resizing position embedding grid-size from %s to %s', old_grid_size, grid_size)
+    _logger.info('Resizing position embedding grid-size from %s to %s', old_grid_size, grid_size)
     pos_emb_img = pos_emb_img.reshape(1, old_grid_size[0], old_grid_size[1], -1).permute(0, 3, 1, 2)
     pos_emb_img = F.interpolate(
         pos_emb_img,
@@ -841,7 +774,7 @@ def resize_text_pos_embed(state_dict, model, interpolation: str = 'linear', anti
     if old_num_pos == num_pos:
         return
 
-    logging.info('Resizing text position embedding num_pos from %s to %s', old_num_pos, num_pos)
+    _logger.info('Resizing text position embedding num_pos from %s to %s', old_num_pos, num_pos)
     old_pos_embed = old_pos_embed.reshape(1, old_num_pos, old_width).permute(0, 2, 1)
     old_pos_embed = F.interpolate(
         old_pos_embed,

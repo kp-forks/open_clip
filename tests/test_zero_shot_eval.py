@@ -38,27 +38,29 @@ def test_zero_shot_eval_handles_already_unwrapped_model(monkeypatch):
         lambda model, **_kwargs: build_models.append(model) or object(),
     )
 
-    def _run(model, classifier, dataloader, args):
+    def _run(model, classifier, dataloader, args, **kwargs):
         run_models.append(model)
         return 1.0, 1.0
 
-    monkeypatch.setattr(zero_shot_module, "run", _run)
+    monkeypatch.setattr(zero_shot_module, "run_zero_shot_classifier", _run)
 
     args = SimpleNamespace(
-        distributed=True,
-        horovod=False,
+        distributed=False,
         zeroshot_frequency=1,
         epochs=1,
         model="ViT-B-32",
         device="cpu",
         precision="fp32",
         batch_size=1,
+        rank=0,
+        fsdp=False,
     )
     data = {"imagenet-val": _DataWrapper()}
 
     results = zero_shot_module.zero_shot_eval(bare_model, data, epoch=1, args=args)
 
     assert results["imagenet-zeroshot-val-top1"] == 1.0
+    # get_model_from_task passes the bare model through unchanged
     assert build_models == [bare_model]
     assert run_models == [bare_model]
 
@@ -84,26 +86,28 @@ def test_zero_shot_eval_unwraps_wrapped_model_once(monkeypatch):
         lambda model, **_kwargs: build_models.append(model) or object(),
     )
 
-    def _run(model, classifier, dataloader, args):
+    def _run(model, classifier, dataloader, args, **kwargs):
         run_models.append(model)
         return 1.0, 1.0
 
-    monkeypatch.setattr(zero_shot_module, "run", _run)
+    monkeypatch.setattr(zero_shot_module, "run_zero_shot_classifier", _run)
 
     args = SimpleNamespace(
         distributed=True,
-        horovod=False,
         zeroshot_frequency=1,
         epochs=1,
         model="ViT-B-32",
         device="cpu",
         precision="fp32",
         batch_size=1,
+        rank=0,
+        fsdp=False,
     )
     data = {"imagenet-val": _DataWrapper()}
 
     results = zero_shot_module.zero_shot_eval(wrapped_model, data, epoch=1, args=args)
 
     assert results["imagenet-zeroshot-val-top1"] == 1.0
-    assert build_models == [bare_model]
-    assert run_models == [bare_model]
+    # get_model_from_task unwraps .module from the DDP-like wrapper
+    assert build_models == [wrapped_model]  # build_zero_shot_classifier gets model_or_task
+    assert run_models == [wrapped_model]  # run_zero_shot_classifier gets model_or_task

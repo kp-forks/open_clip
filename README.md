@@ -3,6 +3,33 @@
 [[Paper]](https://arxiv.org/abs/2212.07143) [[Citations]](#citing) [[Clip Colab]](https://colab.research.google.com/github/mlfoundations/open_clip/blob/master/docs/Interacting_with_open_clip.ipynb) [[Coca Colab]](https://colab.research.google.com/github/mlfoundations/open_clip/blob/master/docs/Interacting_with_open_coca.ipynb)
 [![pypi](https://img.shields.io/pypi/v/open_clip_torch.svg)](https://pypi.python.org/pypi/open_clip_torch)
 
+> ⚠️ **Development branch notice (WIP)**
+>
+> This branch contains an in-progress refactor of the training stack around a new `TrainingTask` abstraction, FSDP2 support, and dict-based batch flow. **For stable training use, pin to the [`v3` branch](https://github.com/mlfoundations/open_clip/tree/v3) (or the latest 3.x release on PyPI).** Inference usage of pretrained models on `main` is unchanged, but the training pipeline has a number of breaking changes — if you have scripts or downstream code that drives `open_clip_train` / imports from `open_clip`, please review the list below before upgrading.
+>
+> **Breaking changes — training CLI:**
+> - `--horovod` removed (Horovod support deleted; DDP/FSDP2 only)
+> - `--torchscript` and `--trace` removed (`torch.jit` is being deprecated upstream)
+> - Default `--precision` changed from `amp` → `amp_bf16` (silent behavior change; pass `--precision amp` explicitly to keep fp16 AMP)
+>
+> **New training CLI flags (opt-in):**
+> - `--fsdp` — use FSDP2 (`fully_shard`) instead of DDP
+> - `--fsdp-no-reshard-after-forward`, `--fsdp-offload-cpu`
+> - `--fsdp-checkpoint {full,sharded}` — full gathers to rank-0 as a single `.pt`; `sharded` uses DCP per-rank shards (faster, lower memory)
+>
+> **Breaking changes — Python API:**
+> - `trace_model` removed from the top-level `open_clip` namespace
+> - `load_openai_model`, `list_openai_models`, and `build_model_from_openai_state_dict` removed. Original-OpenAI weights are still loadable through the standard `create_model_from_pretrained(..., pretrained='openai')` path, which now routes through HuggingFace Hub (`timm/*_clip.openai`) instead of `torch.jit.load` on `openaipublic.azureedge.net` archives. Removing the JIT path closes an arbitrary-code-execution surface (JIT archives can ship pickled code).
+> - Training pipeline now wraps `model + loss` in a `TrainingTask` subclass (`CLIPTask`, `SigLIPTask`, `CoCaTask`, `DistillCLIPTask`). Any code that previously called `train_one_epoch(model, loss, ...)` or `evaluate(model, ...)` directly will need to switch to passing a task. `create_loss(args)` is still available as a standalone loss factory for non-task training loops.
+> - Data pipeline (`CsvDataset`, `SyntheticDataset`, the webdataset pipeline) now emits `{"image": ..., "text": ...}` dicts instead of `(image, text)` tuples. Tuple-style calls through `task(images, texts)` still work via a backward-compat path, but downstream code that iterates a dataloader directly will need `batch["image"]` / `batch["text"]`.
+> - CoCa's autoregressive label shift moved out of `coca_model.py` and into `CoCaTask`. `coca_model.forward()` no longer performs the `[:, :-1]` / `[:, 1:]` slicing — callers that relied on that behavior outside training should handle labels themselves.
+>
+> **Dependency bump:** Minimum `torch>=2.6` (was `>=2.0`). This is the version where `torch.load(weights_only=True)` became the default — all checkpoint loads in this repo now pass `weights_only=True` explicitly with no `weights_only=False` fallback. If you're resuming training with a custom optimizer that pickles non-allowlisted Python types, register them via `torch.serialization.add_safe_globals([...])` before calling `load_checkpoint`.
+>
+> **Checkpoint compatibility:** Existing pretrained `.pt` checkpoints load without changes. Training checkpoints saved on this branch include a `state_dict` key that's compatible with prior versions (EMA and optimizer state are also preserved). `0-D` vs `1-D` scalar reshape from the FSDP path is reconciled on load, so you can resume a DDP-trained checkpoint under FSDP2 and vice versa.
+>
+> **Legacy training entry point:** If you'd rather stay on `main` for the model/factory side but skip the task abstraction (e.g. an existing training script that drives `train_one_epoch(model, loss, ...)` directly), `python -m open_clip_train.legacy_main` runs the pre-task training loop with no `TrainingTask` wrapping, no FSDP, no EMA. It uses the same `params.py` (and ignores the new FSDP flags), the same `data.py`, `zero_shot.py`, etc. Provided as a transitional shim — likely to be removed once the task pipeline lands as default.
+
 Welcome to an open source implementation of OpenAI's [CLIP](https://arxiv.org/abs/2103.00020) (Contrastive Language-Image Pre-training).
 
 Using this codebase, we have trained several models on a variety of data sources and compute budgets, ranging from [small-scale experiments](docs/LOW_ACC.md) to larger runs including models trained on datasets such as [LAION-400M](https://arxiv.org/abs/2111.02114), [LAION-2B](https://arxiv.org/abs/2210.08402) and [DataComp-1B](https://arxiv.org/abs/2304.14108).
