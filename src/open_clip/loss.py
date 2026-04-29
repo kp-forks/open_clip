@@ -395,19 +395,18 @@ class SigLipLoss(nn.Module):
 
         for i in range(0, B, chunk_size):
             end_i = min(i + chunk_size, B)
+            c = end_i - i
             img_chunk = image_features[i:end_i]
-            logits = self.get_logits(img_chunk, text_features, logit_scale, logit_bias)
-            labels = self.get_ground_truth(
-                image_features.device,
-                image_features.dtype,
-                logits.shape[0],
-                negative_only=True,  # start with all negative
-            )
+            logits = self.get_logits(img_chunk, text_features, logit_scale, logit_bias)  # (c, N)
+
+            # Build (c, N) rectangular label tensor: -1 everywhere, +1 at the global diagonal.
+            # We cannot use get_ground_truth here because it returns a square (c, c) tensor.
+            labels = -torch.ones((c, N), device=logits.device, dtype=logits.dtype)
             if not negative_only:
-                # Set diagonal: positive pair at (local_row, global_col) where global_col == i + local_row
-                for k in range(end_i - i):
-                    if i + k < N:
-                        labels[k, i + k] = 1.0
+                cols = torch.arange(i, min(end_i, N), device=logits.device)
+                rows = torch.arange(cols.shape[0], device=logits.device)
+                labels[rows, cols] = 1.0
+
             total_loss = total_loss + (-F.logsigmoid(labels * logits).sum())
 
         return total_loss / B
