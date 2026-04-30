@@ -387,27 +387,35 @@ class SigLipLoss(nn.Module):
 
         Peak memory: O(chunk_size * N) instead of O(B * N).
         Useful when per-device batch is large (e.g. B > 4096).
+
+        Uses the identities -logsigmoid(-x) = softplus(x) and
+        softplus(-x) - softplus(x) = -x to avoid materializing a labels
+        tensor: the all-negative loss is softplus(logits), and each diagonal
+        positive needs only a -logits[k, i+k] correction.
         """
         B = image_features.shape[0]
         N = text_features.shape[0]
         chunk_size = min(self.chunk_size, B)
-        total_loss = torch.tensor(0.0, device=image_features.device, dtype=torch.float32)
+        total_loss = torch.zeros((), device=image_features.device, dtype=torch.float32)
 
         for i in range(0, B, chunk_size):
             end_i = min(i + chunk_size, B)
-            c = end_i - i
             img_chunk = image_features[i:end_i]
-            logits = self.get_logits(img_chunk, text_features, logit_scale, logit_bias)  # (c, N)
+            logits = self.get_logits(img_chunk, text_features, logit_scale, logit_bias)
 
-            # Build (c, N) rectangular label tensor: -1 everywhere, +1 at the global diagonal.
-            # We cannot use get_ground_truth here because it returns a square (c, c) tensor.
-            labels = -torch.ones((c, N), device=logits.device, dtype=logits.dtype)
+            # Treat every pair as negative: -logsigmoid(-logits) == softplus(logits)
+            chunk_loss = F.softplus(logits).sum()
+
             if not negative_only:
-                cols = torch.arange(i, min(end_i, N), device=logits.device)
-                rows = torch.arange(cols.shape[0], device=logits.device)
-                labels[rows, cols] = 1.0
+                # Replace local positives with positive-pair loss:
+                # softplus(-x) - softplus(x) == -x, so subtract the positive logits.
+                num_pos = max(0, min(end_i, N) - i)
+                if num_pos > 0:
+                    rows = torch.arange(num_pos, device=logits.device)
+                    pos_logits = logits[rows, i + rows]
+                    chunk_loss = chunk_loss - pos_logits.sum()
 
-            total_loss = total_loss + (-F.logsigmoid(labels * logits).sum())
+            total_loss = total_loss + chunk_loss
 
         return total_loss / B
 
