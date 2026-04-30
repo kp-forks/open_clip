@@ -315,12 +315,14 @@ class SigLipLoss(nn.Module):
             rank: int = 0,
             world_size: int = 1,
             dist_impl: Optional[str] = None,
+            chunk_size: int = 0,
     ):
         super().__init__()
         self.cache_labels = cache_labels
         self.rank = rank
         self.world_size = world_size
         self.dist_impl = dist_impl or 'bidir'  # default to bidir exchange for now, this will likely change
+        self.chunk_size = chunk_size  # 0 = no chunking (original behavior)
         assert self.dist_impl in ('bidir', 'shift', 'reduce', 'gather')
 
         # cache state FIXME cache not currently used, worthwhile?
@@ -340,6 +342,8 @@ class SigLipLoss(nn.Module):
         return logits
 
     def _loss(self, image_features, text_features, logit_scale, logit_bias=None, negative_only=False):
+        if self.chunk_size > 0:
+            return self._chunked_loss(image_features, text_features, logit_scale, logit_bias, negative_only)
         logits = self.get_logits(image_features, text_features, logit_scale, logit_bias)
         labels = self.get_ground_truth(
             image_features.device,
@@ -349,6 +353,43 @@ class SigLipLoss(nn.Module):
         )
         loss = -F.logsigmoid(labels * logits).sum() / image_features.shape[0]
         return loss
+
+    def _chunked_loss(self, image_features, text_features, logit_scale, logit_bias=None, negative_only=False):
+        """Memory-efficient loss that chunks the logit computation.
+
+        Peak memory: O(chunk_size * N) instead of O(B * N).
+        Useful when per-device batch is large (e.g. B > 4096).
+
+        Uses the identities -logsigmoid(-x) = softplus(x) and
+        softplus(-x) - softplus(x) = -x to avoid materializing a labels
+        tensor: the all-negative loss is softplus(logits), and each diagonal
+        positive needs only a -logits[k, i+k] correction.
+        """
+        B = image_features.shape[0]
+        N = text_features.shape[0]
+        chunk_size = min(self.chunk_size, B)
+        total_loss = torch.zeros((), device=image_features.device, dtype=torch.float32)
+
+        for i in range(0, B, chunk_size):
+            end_i = min(i + chunk_size, B)
+            img_chunk = image_features[i:end_i]
+            logits = self.get_logits(img_chunk, text_features, logit_scale, logit_bias)
+
+            # Treat every pair as negative: -logsigmoid(-logits) == softplus(logits)
+            chunk_loss = F.softplus(logits).sum()
+
+            if not negative_only:
+                # Replace local positives with positive-pair loss:
+                # softplus(-x) - softplus(x) == -x, so subtract the positive logits.
+                num_pos = max(0, min(end_i, N) - i)
+                if num_pos > 0:
+                    rows = torch.arange(num_pos, device=logits.device)
+                    pos_logits = logits[rows, i + rows]
+                    chunk_loss = chunk_loss - pos_logits.sum()
+
+            total_loss = total_loss + chunk_loss
+
+        return total_loss / B
 
     def forward(self, image_features, text_features, logit_scale, logit_bias, output_dict=False):
         loss = self._loss(image_features, text_features, logit_scale, logit_bias)
