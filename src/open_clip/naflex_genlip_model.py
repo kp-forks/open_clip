@@ -513,7 +513,17 @@ def pack_prefix_sequence(
     return combined, pos, attn_mask, k, m
 
 
-def packed_caption_loss(model, prefix_emb, prefix_valid, block_pos, text, text_valid):
+def packed_caption_loss(
+        model,
+        prefix_emb,
+        prefix_valid,
+        block_pos,
+        text,
+        text_valid,
+        z_loss_weight=0.0,
+        compute_dtype=torch.float32,
+        chunk_size=4096,
+):
     """Fused autoregressive caption CE over the packed ``[valid prefix ; valid text ; PAD]`` layout.
 
     Shared by GenLIP and GenLAP (``model`` supplies ``embed_text``/``rotary``/``trunk``/``out_proj``/
@@ -536,6 +546,8 @@ def packed_caption_loss(model, prefix_emb, prefix_valid, block_pos, text, text_v
     target = text[text_src]   # (sum(m),) valid caption tokens, row-major aligned (all valid -> no ignore)
     return fused_linear_cross_entropy(
         pred, model.lm_head.weight, target, bias=model.lm_head.bias, ignore_index=-100,
+        chunk_size=chunk_size, z_loss_weight=z_loss_weight, compute_dtype=compute_dtype,
+        return_components=True,
     )
 
 
@@ -792,6 +804,9 @@ class NaFlexGenLip(nn.Module):
             text: torch.Tensor,
             text_valid: Optional[torch.Tensor] = None,
             compute_loss: bool = False,
+            caption_z_loss_weight: float = 0.0,
+            caption_loss_compute_dtype=torch.float32,
+            caption_loss_chunk_size: int = 4096,
     ) -> Dict[str, torch.Tensor]:
         """Run the unified trunk over ``[image_patches ; caption_tokens]``.
 
@@ -812,12 +827,16 @@ class NaFlexGenLip(nn.Module):
 
         if compute_loss and self.pack_prefix:
             # Packed layout: compact [valid image ; valid text ; PAD] per row (no padding between the two).
-            return {'loss': packed_caption_loss(
+            loss, caption_ce, caption_z = packed_caption_loss(
                 self,
                 self.patch_embed(image['patches']), image['patch_valid'],
                 build_mrope_position_ids(image['patch_coord'], image['patch_valid'], text_valid),
                 text, text_valid,
-            )}
+                z_loss_weight=caption_z_loss_weight,
+                compute_dtype=caption_loss_compute_dtype,
+                chunk_size=caption_loss_chunk_size,
+            )
+            return {'loss': loss, 'caption_ce': caption_ce, 'caption_z': caption_z}
 
         hidden, ni = self._encode(image, text, text_valid)  # (B, S, D), Ni
 
@@ -827,16 +846,20 @@ class NaFlexGenLip(nn.Module):
             # (never predicted) and avoids the dominant memory cost of full-sequence logits.
             pred = hidden[:, ni - 1:-1, :]  # (B, Lt, D)
             target = torch.where(text_valid, text, torch.full_like(text, -100))  # (B, Lt)
-            loss = fused_linear_cross_entropy(
+            loss, caption_ce, caption_z = fused_linear_cross_entropy(
                 pred.reshape(-1, pred.shape[-1]),
                 self.lm_head.weight,
                 target.reshape(-1),
                 bias=self.lm_head.bias,
                 ignore_index=-100,
+                chunk_size=caption_loss_chunk_size,
+                z_loss_weight=caption_z_loss_weight,
+                compute_dtype=caption_loss_compute_dtype,
+                return_components=True,
             )
             # NOTE: return only tensors here. Returning a Python int (e.g. image_seq_len) breaks
             # torch.compile under the DDP graph-splitter (AOTAutograd expects FX nodes with .meta).
-            return {'loss': loss}
+            return {'loss': loss, 'caption_ce': caption_ce, 'caption_z': caption_z}
 
         logits = self.lm_head(hidden)
         return {'logits': logits, 'image_seq_len': ni}

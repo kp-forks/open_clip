@@ -1069,9 +1069,14 @@ def create_loss(args, model: Optional[torch.nn.Module] = None):
             cache_labels=cache_labels,
             rank=args.rank,
             world_size=args.world_size,
+            z_loss_weight=getattr(args, 'caption_z_loss_weight', 0.0),
+            compute_dtype=getattr(args, 'caption_loss_compute_dtype', 'float32'),
         )
     elif is_genlip:
-        return GenLipLoss()
+        return GenLipLoss(
+            z_loss_weight=getattr(args, 'caption_z_loss_weight', 0.0),
+            compute_dtype=getattr(args, 'caption_loss_compute_dtype', 'float32'),
+        )
     elif args.siglip:
         return SigLipLoss(
             cache_labels=cache_labels,
@@ -1138,15 +1143,28 @@ def create_task(args, model, dist_model=None, naflex_data_config=None):
             caption_loss_weight=args.coca_caption_loss_weight,
             clip_loss_weight=args.coca_contrastive_loss_weight,
             fused_caption_loss=getattr(args, 'fused_caption_loss', False),
+            caption_z_loss_weight=getattr(args, 'caption_z_loss_weight', 0.0),
+            caption_loss_compute_dtype=getattr(args, 'caption_loss_compute_dtype', 'float32'),
+            caption_loss_chunk_size=getattr(args, 'caption_loss_chunk_size', 4096),
             local_loss=args.local_loss,
             gather_with_grad=args.gather_with_grad,
             cache_labels=cache_labels,
             **shared,
         )
     elif isinstance(model_unwrapped, NaFlexGenLap):
-        task = GenLapTask(model)
+        task = GenLapTask(
+            model,
+            caption_z_loss_weight=getattr(args, 'caption_z_loss_weight', 0.0),
+            caption_loss_compute_dtype=getattr(args, 'caption_loss_compute_dtype', 'float32'),
+            caption_loss_chunk_size=getattr(args, 'caption_loss_chunk_size', 4096),
+        )
     elif isinstance(model_unwrapped, NaFlexGenLip):
-        task = GenLipTask(model)
+        task = GenLipTask(
+            model,
+            caption_z_loss_weight=getattr(args, 'caption_z_loss_weight', 0.0),
+            caption_loss_compute_dtype=getattr(args, 'caption_loss_compute_dtype', 'float32'),
+            caption_loss_chunk_size=getattr(args, 'caption_loss_chunk_size', 4096),
+        )
     elif args.siglip:
         task = SigLIPTask(
             model,

@@ -206,6 +206,9 @@ class NaFlexGenLap(nn.Module):
             text: torch.Tensor,
             text_valid: Optional[torch.Tensor] = None,
             compute_loss: bool = False,
+            caption_z_loss_weight: float = 0.0,
+            caption_loss_compute_dtype=torch.float32,
+            caption_loss_chunk_size: int = 4096,
     ) -> Dict[str, torch.Tensor]:
         """Generative forward over ``[audio_patches ; caption_tokens]`` (see :class:`NaFlexGenLip`).
 
@@ -223,28 +226,36 @@ class NaFlexGenLap(nn.Module):
         if compute_loss and self.pack_prefix:
             # Packed layout: compact [valid audio ; valid text ; PAD] per row (no padding between the two);
             # the first caption token is then predicted from the last *valid* audio token, not a padding slot.
-            return {'loss': packed_caption_loss(
+            loss, caption_ce, caption_z = packed_caption_loss(
                 self,
                 self.audio_embed(audio['patches']), audio['patch_valid'],
                 build_audio_position_ids(audio['patch_coord'], audio['patch_valid'], text_valid,
                                          rope_1d=self.rope_1d),
                 text, text_valid,
-            )}
+                z_loss_weight=caption_z_loss_weight,
+                compute_dtype=caption_loss_compute_dtype,
+                chunk_size=caption_loss_chunk_size,
+            )
+            return {'loss': loss, 'caption_ce': caption_ce, 'caption_z': caption_z}
 
         hidden, ni = self._encode(audio, text, text_valid)  # (B, S, D), Ni
 
         if compute_loss:
             pred = hidden[:, ni - 1:-1, :]  # (B, Lt, D): position p predicts token p+1
             target = torch.where(text_valid, text, torch.full_like(text, -100))
-            loss = fused_linear_cross_entropy(
+            loss, caption_ce, caption_z = fused_linear_cross_entropy(
                 pred.reshape(-1, pred.shape[-1]),
                 self.lm_head.weight,
                 target.reshape(-1),
                 bias=self.lm_head.bias,
                 ignore_index=-100,
+                chunk_size=caption_loss_chunk_size,
+                z_loss_weight=caption_z_loss_weight,
+                compute_dtype=caption_loss_compute_dtype,
+                return_components=True,
             )
             # return only tensors (torch.compile/DDP graph-splitter safety) -- see NaFlexGenLip.forward.
-            return {'loss': loss}
+            return {'loss': loss, 'caption_ce': caption_ce, 'caption_z': caption_z}
 
         logits = self.lm_head(hidden)
         return {'logits': logits, 'audio_seq_len': ni}

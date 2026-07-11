@@ -33,6 +33,9 @@ class GenLipTask(ImageTextTask):
             loss: Optional[nn.Module] = None,
             fused_loss: bool = True,
             default_loss: bool = True,
+            caption_z_loss_weight: float = 0.0,
+            caption_loss_compute_dtype="float32",
+            caption_loss_chunk_size: int = 4096,
             device: Optional[torch.device] = None,
             dtype: Optional[torch.dtype] = None,
             verbose: bool = True,
@@ -53,6 +56,10 @@ class GenLipTask(ImageTextTask):
         """
         super().__init__(model, device=device, dtype=dtype, verbose=verbose)
         self.pad_id = unwrap_model(model).pad_id
+        self.caption_z_loss_weight = float(caption_z_loss_weight)
+        self.caption_loss_compute_dtype = caption_loss_compute_dtype
+        self.caption_loss_chunk_size = int(caption_loss_chunk_size)
+        self._default_caption_loss = False
         if loss is not None:
             # Explicit external objective: model is just a logits producer, loss owns the objective.
             self.loss = loss
@@ -62,7 +69,11 @@ class GenLipTask(ImageTextTask):
             self.fused_loss = True
         elif default_loss:
             from open_clip.loss import GenLipLoss
-            self.loss = GenLipLoss()
+            self.loss = GenLipLoss(
+                z_loss_weight=self.caption_z_loss_weight,
+                compute_dtype=self.caption_loss_compute_dtype,
+            )
+            self._default_caption_loss = True
             self.fused_loss = False
         else:
             # Eval-only construction: no loss module, no fused loss path.
@@ -78,9 +89,17 @@ class GenLipTask(ImageTextTask):
                 text=batch["text"],
                 text_valid=batch.get("text_valid"),
                 compute_loss=True,
+                caption_z_loss_weight=self.caption_z_loss_weight,
+                caption_loss_compute_dtype=self.caption_loss_compute_dtype,
+                caption_loss_chunk_size=self.caption_loss_chunk_size,
                 **{self._modality_kwarg: modality},
             )
-            return {"caption_loss": out["loss"], "loss": out["loss"]}
+            return {
+                "caption_loss": out["loss"],
+                "caption_ce": out["caption_ce"].detach(),
+                "caption_z": out["caption_z"].detach(),
+                "loss": out["loss"],
+            }
 
         # External-loss path: drive the model as a plain logits producer and apply the autoregressive shift
         # here (CoCa-style), then let the external loss module compute the objective. NOTE: this materializes
@@ -101,7 +120,12 @@ class GenLipTask(ImageTextTask):
         # so the text-predicting window is logits[:, ni-1:-1] -> (B, Lt, vocab).
         logits = out["logits"][:, ni - 1:-1]
         labels = torch.where(text_valid, text, torch.full_like(text, -100))
-        losses = self.loss(logits, labels, output_dict=True)
+        losses = self.loss(
+            logits,
+            labels,
+            output_dict=True,
+            **({"return_components": True} if self._default_caption_loss else {}),
+        )
         losses["loss"] = sum(v for k, v in losses.items() if k.endswith("_loss"))
         return losses
 

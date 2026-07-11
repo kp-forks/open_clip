@@ -9,6 +9,7 @@ import sys
 import types
 
 import pytest
+import torch
 import torch.nn as nn
 
 os.environ['CUDA_VISIBLE_DEVICES'] = ''
@@ -143,6 +144,23 @@ def test_create_task_plumbs_coca_loss_weights():
     task = create_task(args, model=model)
     assert task.loss.caption_loss_weight == 3.5
     assert task.loss.clip_loss_weight == 0.25
+
+
+def test_create_task_plumbs_caption_loss_options():
+    model = open_clip.create_model('coca_ViT-B-32')
+    args = _make_args(
+        model='coca_ViT-B-32',
+        caption_z_loss_weight=1e-4,
+        caption_loss_compute_dtype='bfloat16',
+        caption_loss_chunk_size=512,
+    )
+    task = create_task(args, model=model)
+
+    assert task.caption_z_loss_weight == 1e-4
+    assert task.caption_loss_compute_dtype == 'bfloat16'
+    assert task.caption_loss_chunk_size == 512
+    assert task.loss.z_loss_weight == 1e-4
+    assert task.loss.compute_dtype is torch.bfloat16
 
 
 def test_create_task_plumbs_rank_world_size():

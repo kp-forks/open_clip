@@ -193,6 +193,9 @@ class MaMMUT(nn.Module):
             image_embs: Optional[torch.Tensor] = None,
             image_embs_valid: Optional[torch.Tensor] = None,
             labels: Optional[torch.Tensor] = None,
+            caption_z_loss_weight: float = 0.0,
+            caption_loss_compute_dtype=torch.float32,
+            caption_loss_chunk_size: int = 4096,
     ):
         """text_valid: optional [B, L] bool/int text validity (True/1 = real token), consumed by the
         contrastive pass (attention + pooling, passed straight through to the decoder's
@@ -239,13 +242,18 @@ class MaMMUT(nn.Module):
                 mode='caption', return_hidden=True)
             pred = hidden[:, :-1]
             weight, bias = self.text.lm_head_params
-            out_dict["caption_loss"] = fused_linear_cross_entropy(
+            caption_loss, caption_ce, caption_z = fused_linear_cross_entropy(
                 pred.reshape(-1, pred.shape[-1]),
                 weight,
                 labels.reshape(-1),
                 bias=bias,
                 ignore_index=-100,
+                chunk_size=caption_loss_chunk_size,
+                z_loss_weight=caption_z_loss_weight,
+                compute_dtype=caption_loss_compute_dtype,
+                return_components=True,
             )
+            out_dict.update(caption_loss=caption_loss, caption_ce=caption_ce, caption_z=caption_z)
         else:
             out_dict["logits"] = self.text(
                 text, context=image_kv, context_valid=image_embs_valid, mode='caption')

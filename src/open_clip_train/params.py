@@ -708,6 +708,26 @@ def parse_args(args):
              "Not yet supported with --accum-freq > 1."
     )
     parser.add_argument(
+        "--caption-z-loss-weight",
+        type=float,
+        default=0.0,
+        help="Weight for mean square(logsumexp(vocabulary logits)) on valid next-token targets. "
+             "Applies to CoCa/MaMMUT and GenLIP/GenLAP; 0 disables it."
+    )
+    parser.add_argument(
+        "--caption-loss-compute-dtype",
+        choices=("float32", "bfloat16"),
+        default="float32",
+        help="Dtype used by caption CE/logsumexp. Scalar loss reductions remain float32. The default "
+             "matches existing numerics; bfloat16 is an experimental speed/memory tradeoff."
+    )
+    parser.add_argument(
+        "--caption-loss-chunk-size",
+        type=int,
+        default=4096,
+        help="Number of valid next-token rows per vocabulary-logit chunk in fused caption loss."
+    )
+    parser.add_argument(
         "--remote-sync",
         type=str,
         default=None,
@@ -900,6 +920,12 @@ def parse_args(args):
     # A negative EMA horizon would make the decay exp(-n/h) > 1 and diverge the EMA; 0 disables it.
     if args.train_loss_ema_samples < 0:
         raise ValueError(f"--train-loss-ema-samples must be >= 0 (0 disables), got {args.train_loss_ema_samples}.")
+
+    if args.caption_z_loss_weight < 0:
+        raise ValueError(
+            f"--caption-z-loss-weight must be >= 0 (0 disables), got {args.caption_z_loss_weight}.")
+    if args.caption_loss_chunk_size <= 0:
+        raise ValueError(f"--caption-loss-chunk-size must be > 0, got {args.caption_loss_chunk_size}.")
 
     # GenLIP is a generative model with its own NaFlex linear patch-embed: it consumes the NaFlex data
     # pipeline but must NOT have its vision tower converted to a timm NaFlexVit (force_naflex_vision).

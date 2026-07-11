@@ -286,8 +286,12 @@ def test_pack_prefix_variable_prefix_runs():
     model = open_clip.create_model(TEST_MODEL).eval()
     model.pack_prefix = True
     batch = _make_batch(model.pad_id)  # last sample has fewer valid patches (k < Na)
-    loss = model(image=batch['image'], text=batch['text'], text_valid=batch['text_valid'], compute_loss=True)['loss']
-    assert loss.ndim == 0 and torch.isfinite(loss)
+    out = model(
+        image=batch['image'], text=batch['text'], text_valid=batch['text_valid'], compute_loss=True,
+        caption_z_loss_weight=1e-4, caption_loss_chunk_size=7,
+    )
+    assert out['loss'].ndim == 0 and torch.isfinite(out['loss'])
+    assert out['caption_z'] > 0
 
 
 def test_task_fused_loss_flag():
@@ -300,18 +304,19 @@ def test_task_fused_loss_flag():
     model.eval()
     batch = _make_batch(model.pad_id)
 
-    fused_task = GenLipTask(model)
+    fused_task = GenLipTask(model, caption_z_loss_weight=1e-4, caption_loss_chunk_size=7)
     assert fused_task.fused_loss is True
     assert not hasattr(fused_task, 'loss')  # default carries no would-be-unused loss module
 
-    ext_task = GenLipTask(model, fused_loss=False)
+    ext_task = GenLipTask(model, fused_loss=False, caption_z_loss_weight=1e-4)
     assert ext_task.fused_loss is False
     assert type(ext_task.loss).__name__ == 'GenLipLoss'
 
     fused = fused_task._loss_forward(model, batch)
     ext = ext_task._loss_forward(model, batch)
     for out in (fused, ext):
-        assert 'caption_loss' in out and 'loss' in out and torch.isfinite(out['loss'])
+        assert all(k in out for k in ('caption_loss', 'caption_ce', 'caption_z', 'loss'))
+        assert torch.isfinite(out['loss']) and out['caption_z'] > 0
     assert torch.allclose(fused['loss'], ext['loss'], atol=1e-4), \
         f"{fused['loss'].item()} != {ext['loss'].item()}"
 

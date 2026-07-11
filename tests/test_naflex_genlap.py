@@ -83,8 +83,12 @@ def test_genlap_pack_prefix_variable_runs():
     model.pack_prefix = True
     audio = _audio_batch(model)  # last sample shorter -> variable prefix
     text, text_valid = _text(model.pad_id)
-    loss = model(audio=audio, text=text, text_valid=text_valid, compute_loss=True)["loss"]
-    assert loss.ndim == 0 and torch.isfinite(loss)
+    out = model(
+        audio=audio, text=text, text_valid=text_valid, compute_loss=True,
+        caption_z_loss_weight=1e-4, caption_loss_chunk_size=7,
+    )
+    assert out["loss"].ndim == 0 and torch.isfinite(out["loss"])
+    assert out["caption_z"] > 0
 
 
 def test_genlap_1d_vs_2d_rope_mode():
@@ -153,6 +157,7 @@ def test_create_task_dispatches_genlap_and_trains():
         model=CONFIG_1D, distill=False, siglip=False, rank=0, world_size=0,
         coca_caption_loss_weight=2.0, coca_contrastive_loss_weight=1.0,
         local_loss=False, gather_with_grad=False, horovod=False, loss_dist_impl=None,
+        caption_z_loss_weight=1e-4, caption_loss_compute_dtype="float32", caption_loss_chunk_size=7,
     )
     task = create_task(args, model=model)
     assert type(task).__name__ == "GenLapTask"
@@ -163,7 +168,8 @@ def test_create_task_dispatches_genlap_and_trains():
     text, text_valid = _text(model.pad_id)
     task.train()
     losses, _ = task({"audio": audio, "text": text, "text_valid": text_valid})
-    assert "caption_loss" in losses and "loss" in losses and torch.isfinite(losses["loss"])
+    assert all(k in losses for k in ("caption_loss", "caption_ce", "caption_z", "loss"))
+    assert losses["caption_z"] > 0 and torch.isfinite(losses["loss"])
 
 
 def test_genlap_pre_norm_per_modality_streams():
